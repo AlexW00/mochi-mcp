@@ -24,6 +24,7 @@ before(async () => {
       mochiApiKey: "key",
       mochiBaseUrl: "https://mochi.test/api",
       queue: { minIntervalMs: 0, maxIntervalMs: 20, maxRetries: 5, requestTimeoutMs: 5_000, maxPending: 1_000 },
+      searchCacheTtlMs: 7 * 24 * 3_600_000,
     },
     { sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 5))) },
     mochi.fetch,

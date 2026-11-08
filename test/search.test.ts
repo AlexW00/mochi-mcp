@@ -23,7 +23,7 @@ beforeEach(async () => {
   mochi.cards.set("r1", kanjiCard("r1", "氵", "Wasser-Radikal", "kanjiSub"));
   mochi.cards.set("w1", kanjiCard("w1", "水", "Wasser", "inbox"));
   const deps = createDeps(
-    { mochiApiKey: "key", mochiBaseUrl: "https://mochi.test/api", queue: { minIntervalMs: 0, maxIntervalMs: 10, maxRetries: 3, requestTimeoutMs: 5_000, maxPending: 1_000 } },
+    { mochiApiKey: "key", mochiBaseUrl: "https://mochi.test/api", queue: { minIntervalMs: 0, maxIntervalMs: 10, maxRetries: 3, requestTimeoutMs: 5_000, maxPending: 1_000 }, searchCacheTtlMs: 7 * 24 * 3_600_000 },
     { sleep: () => Promise.resolve() },
     mochi.fetch,
   );

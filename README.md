@@ -19,10 +19,13 @@ The fork replaces the Vercel/Next.js transport with a standalone Node server and
   If an identical write batch is resubmitted within 15 minutes, the server returns the
   existing job instead of writing the items again.
 - **Search.** Mochi's API cannot search, so `search_cards` loads the requested decks once
-  (100 cards per queued request), keeps them in memory for 10 minutes and filters locally by
-  text, field, tag or template. You can look up many terms in one call. Edits made through this
-  server update the index immediately. Cards changed in the Mochi app appear after the TTL,
-  with `refresh: true`, or per hit with `verify: true`, which re-fetches each hit live.
+  (100 cards per queued request), keeps them in memory and filters locally by text, field,
+  tag or template. You can look up many terms in one call. The cache assumes cards change
+  only through this server: its own creates, updates, moves and deletes update the index
+  immediately, and loaded decks are kept for a week (`MOCHI_SEARCH_CACHE_TTL_HOURS`).
+  Mochi offers no change feed, so edits made in the Mochi app are not detected. After such
+  edits, pass `refresh: true` (reload) or `verify: true` (re-fetch each hit live). A restart or
+  redeploy starts with an empty index.
 - **Safe partial updates.** When only some template fields change, the server reads the live
   card first and merges, so other fields are never dropped.
 - **Fewer requests.** Deck and template lists are cached for five minutes; changes
@@ -64,6 +67,7 @@ following at most three redirects, and accepts files up to 10 MiB.
 | `MOCHI_MAX_RETRIES` | `6` | Retries per request |
 | `MOCHI_REQUEST_TIMEOUT_MS` | `30000` | Per-request timeout |
 | `MOCHI_MAX_PENDING` | `500` | Maximum number of queued requests |
+| `MOCHI_SEARCH_CACHE_TTL_HOURS` | `168` | How long `search_cards` keeps loaded decks before reloading (one week; `0` reloads on every search) |
 | `PORT` | `8000` | Listening port |
 | `TRUST_PROXY_HOPS` | `1` | Reverse proxies in front of the server, used for client IPs in rate limiting |
 

@@ -1,6 +1,7 @@
 import type { Card, Deck, MochiClient, Template } from "./client.js";
 
-const DEFAULT_TTL_MS = 10 * 60_000;
+/** Default: one week. Cards are assumed to change only through this server; see README. */
+export const DEFAULT_SEARCH_CACHE_TTL_MS = 7 * 24 * 60 * 60_000;
 const MAX_CARDS = 50_000;
 
 export type MatchMode = "contains" | "exact" | "prefix" | "regex";
@@ -48,9 +49,10 @@ export function normalize(value: string): string {
 /**
  * Mochi's API cannot search, only list cards page by page. This index loads
  * the requested decks (or the whole account) once through the rate-limited
- * queue, keeps cards in memory, and filters locally. Writes made through this
- * server update the index immediately; changes made elsewhere (the Mochi app)
- * appear after the TTL or a refresh.
+ * queue, keeps cards in memory (one week by default), and filters locally.
+ * Writes made through this server update the index immediately. Changes made
+ * elsewhere (the Mochi app) are not detected: they appear after the TTL, a
+ * refresh, or a process restart (every deployment starts with an empty index).
  */
 export class CardIndex {
   private readonly cards = new Map<string, Card>();
@@ -60,7 +62,7 @@ export class CardIndex {
 
   constructor(
     private readonly client: MochiClient,
-    private readonly ttlMs = DEFAULT_TTL_MS,
+    private readonly ttlMs = DEFAULT_SEARCH_CACHE_TTL_MS,
     private readonly now: () => number = Date.now,
   ) {
     client.onCardChange((change) => {

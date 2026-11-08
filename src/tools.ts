@@ -399,8 +399,9 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       title: "Search cards",
       description:
         "Searches cards by text in their fields (e.g. the kanji, word or grammar form), optionally limited to decks, fields, tags or a template. " +
-        "Mochi's API has no search, so the server loads the requested decks once (100 cards per queued request), caches them for 15 minutes and filters locally; " +
-        "later searches are instant and edits made through this server stay in sync. Pass several terms in `queries` to look up many cards in one call. " +
+        "Mochi's API has no search, so the server loads the requested decks once (100 cards per queued request), keeps them in memory for a week and filters locally; " +
+        "later searches are instant. Edits made through this server (create/update/move/delete) update the cache immediately, but edits made in the Mochi app are not detected: " +
+        "use refresh=true if the user says they changed cards there. Pass several terms in `queries` to look up many cards in one call. " +
         "Use the returned IDs with update_cards (e.g. deck_id to move cards), get_cards or delete_cards.",
       inputSchema: {
         query: z.string().min(1).optional().describe("Single search term."),
@@ -418,7 +419,10 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         include_trashed: z.boolean().default(false),
         include_fields: z.boolean().default(false).describe("Return all field values of each hit (field name → value)."),
         limit: z.number().int().min(1).max(500).default(25).describe("Maximum hits per query."),
-        refresh: z.boolean().default(false).describe("Reload the decks from Mochi first, e.g. after cards were added or edited in the Mochi app."),
+        refresh: z
+          .boolean()
+          .default(false)
+          .describe("Reload the decks from Mochi first. Only needed after cards were added or edited outside this server (e.g. in the Mochi app); otherwise the cache is current."),
         verify: z
           .boolean()
           .default(false)

@@ -31,6 +31,8 @@ export interface Config {
   mochiApiKey: string;
   mochiBaseUrl: string;
   queue: QueueConfig;
+  /** How long loaded decks stay in the search index before reloading. */
+  searchCacheTtlMs: number;
 }
 
 export const DEFAULT_REDIRECT_ALLOWLIST = [
@@ -68,6 +70,7 @@ export function loadConfig(env: Env = process.env): Config {
       requestTimeoutMs: int(env, "MOCHI_REQUEST_TIMEOUT_MS", 30_000, 1_000, 300_000),
       maxPending: int(env, "MOCHI_MAX_PENDING", 500, 1, 100_000),
     },
+    searchCacheTtlMs: int(env, "MOCHI_SEARCH_CACHE_TTL_HOURS", 168, 0, 24 * 365) * 3_600_000,
   };
 }
 
