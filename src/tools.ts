@@ -3,11 +3,14 @@ import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/
 import * as z from "zod";
 import { downloadAttachment, MAX_ATTACHMENT_BYTES } from "./attachments.js";
 import type { JobManager } from "./jobs.js";
-import type { Card, CardInput, DeckInput, FieldValue, MochiClient } from "./mochi/client.js";
+import type { Card, CardInput, DeckInput, FieldValue, MochiClient, Template } from "./mochi/client.js";
+import { CardIndex, expandDecks } from "./mochi/card-index.js";
+import { MochiApiError } from "./mochi/queue.js";
 
 export interface ToolDeps {
   client: MochiClient;
   jobs: JobManager;
+  index: CardIndex;
   fetchImpl?: typeof fetch;
 }
 
@@ -169,7 +172,17 @@ function compactDeck(deck: Record<string, unknown>) {
 }
 
 export function registerTools(server: McpServer, deps: ToolDeps): void {
-  const { client, jobs } = deps;
+  const { client, jobs, index } = deps;
+
+  /**
+   * Partial field updates: read the live card first and merge, so changing one
+   * template field never drops the others (and never uses stale cached data).
+   */
+  async function updateCardMerged(cardId: string, input: CardInput, priority: "interactive" | "bulk" = "interactive") {
+    if (!input.fields) return client.updateCard(cardId, input, { priority });
+    const current = await client.getCard(cardId, { priority });
+    return client.updateCard(cardId, { ...input, fields: { ...(current.fields ?? {}), ...input.fields } }, { priority });
+  }
 
   async function jobResult(jobId: string, wait: number, extra: Record<string, unknown> = {}) {
     await jobs.wait(jobId, wait * 1000);
@@ -381,6 +394,107 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
   // Cards: single operations
 
   server.registerTool(
+    "search_cards",
+    {
+      title: "Search cards",
+      description:
+        "Searches cards by text in their fields (e.g. the kanji, word or grammar form), optionally limited to decks, fields, tags or a template. " +
+        "Mochi's API has no search, so the server loads the requested decks once (100 cards per queued request), caches them for 15 minutes and filters locally; " +
+        "later searches are instant and edits made through this server stay in sync. Pass several terms in `queries` to look up many cards in one call. " +
+        "Use the returned IDs with update_cards (e.g. deck_id to move cards), get_cards or delete_cards.",
+      inputSchema: {
+        query: z.string().min(1).optional().describe("Single search term."),
+        queries: z.array(z.string().min(1)).max(200).optional().describe("Several search terms; results are grouped per term."),
+        deck_ids: z.array(id("Deck")).optional().describe("Limit to these decks. Strongly recommended for large collections."),
+        include_subdecks: z.boolean().default(true),
+        fields: z
+          .array(z.string().min(1))
+          .optional()
+          .describe("Field IDs or names to search (e.g. [\"name\"] for the primary field, [\"meaning\"]). Default: all fields and content."),
+        match: z.enum(["contains", "exact", "prefix", "regex"]).default("contains").describe("Matching ignores case, width, whitespace and 〜/～."),
+        tags: z.array(z.string().min(1)).optional().describe("Only cards having all of these tags."),
+        template_id: id("Template").optional(),
+        include_archived: z.boolean().default(true),
+        include_trashed: z.boolean().default(false),
+        include_fields: z.boolean().default(false).describe("Return all field values of each hit (field name → value)."),
+        limit: z.number().int().min(1).max(500).default(25).describe("Maximum hits per query."),
+        refresh: z.boolean().default(false).describe("Reload the decks from Mochi first, e.g. after cards were added or edited in the Mochi app."),
+        verify: z
+          .boolean()
+          .default(false)
+          .describe("Re-fetch every hit live before returning (drops cards deleted or changed elsewhere). One request per hit."),
+        wait_seconds: waitSecondsSchema(30),
+      },
+      annotations: READ,
+    },
+    guarded(async (args) => {
+      const queries = [...(args.query ? [args.query] : []), ...(args.queries ?? [])];
+      if (!queries.length) throw new Error("Provide query or queries");
+      if (args.match === "regex") for (const query of queries) new RegExp(query, "iu");
+      const decks = await client.listDecks();
+      const scope = args.deck_ids?.length ? expandDecks(args.deck_ids, decks, args.include_subdecks) : undefined;
+      const loading = index.ensure(scope, args.refresh);
+      let failed: unknown;
+      loading.catch((error: unknown) => (failed = error));
+      let timer: NodeJS.Timeout | undefined;
+      const complete = await Promise.race([
+        loading.then(() => true, () => true),
+        new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), args.wait_seconds * 1000))),
+      ]);
+      clearTimeout(timer);
+      if (failed) throw failed;
+      const templates = new Map<string, Template>((await client.listTemplates()).map((template) => [template.id, template]));
+      const searchOptions = {
+          queries,
+          deckIds: scope,
+          includeSubdecks: false,
+          fields: args.fields,
+          match: args.match,
+          tags: args.tags,
+          templateId: args.template_id,
+          includeArchived: args.include_archived,
+          includeTrashed: args.include_trashed,
+          limitPerQuery: args.limit,
+      };
+      let results = index.search(searchOptions, decks, templates);
+      if (args.verify) {
+        const ids = [...new Set(results.flatMap((result) => result.hits.map((hit) => hit.id)))];
+        for (const cardId of ids) {
+          try {
+            index.upsert(await client.getCard(cardId));
+          } catch (error) {
+            if (error instanceof MochiApiError && error.status === 404) index.remove(cardId);
+            else throw error;
+          }
+        }
+        results = index.search(searchOptions, decks, templates);
+      }
+      if (args.include_fields) {
+        for (const result of results) {
+          for (const hit of result.hits) {
+            const card = index.get(hit.id);
+            const template = card?.["template-id"] ? templates.get(card["template-id"]) : undefined;
+            hit.fields = Object.fromEntries(
+              Object.entries(card?.fields ?? {}).map(([fieldId, field]) => [template?.fields?.[fieldId]?.name ?? fieldId, field.value]),
+            );
+          }
+        }
+      }
+      return {
+        complete,
+        indexed_cards: index.size(),
+        index_age_seconds: index.ageSeconds(scope),
+        verified: args.verify || undefined,
+        results: queries.length === 1 ? undefined : results,
+        ...(queries.length === 1 ? { total: results[0]?.total ?? 0, hits: results[0]?.hits ?? [] } : {}),
+        next_step: complete
+          ? undefined
+          : "Still loading cards from Mochi; results so far are partial. Call search_cards again with the same arguments.",
+      };
+    }),
+  );
+
+  server.registerTool(
     "list_cards",
     {
       title: "List cards",
@@ -433,7 +547,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       inputSchema: { card_id: id("Card"), deck_id: id("Target deck").optional(), trashed: trashed.optional(), ...partial(cardProps) },
       annotations: UPDATE,
     },
-    guarded(async ({ card_id, ...args }) => client.updateCard(card_id, toCardInput(args))),
+    guarded(async ({ card_id, ...args }) => updateCardMerged(card_id, toCardInput(args))),
   );
 
   server.registerTool(
@@ -586,7 +700,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       const { job, deduplicated } = jobs.submit(
         "update_cards",
         items,
-        async ({ card_id, input }) => summarizeCard(await client.updateCard(card_id, input, { priority: "bulk" })),
+        async ({ card_id, input }) => summarizeCard(await updateCardMerged(card_id, input, "bulk")),
         { stopOnError: stop_on_error, dedupeKey: items },
       );
       return jobResult(job.job_id, wait_seconds, deduplicated ? { deduplicated: true } : {});

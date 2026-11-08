@@ -18,6 +18,13 @@ The fork replaces the Vercel/Next.js transport with a standalone Node server and
   `wait_seconds`, then returns either the results or a `job_id` to poll with `get_job`.
   If an identical write batch is resubmitted within 15 minutes, the server returns the
   existing job instead of writing the items again.
+- **Search.** Mochi's API cannot search, so `search_cards` loads the requested decks once
+  (100 cards per queued request), keeps them in memory for 10 minutes and filters locally by
+  text, field, tag or template. You can look up many terms in one call. Edits made through this
+  server update the index immediately. Cards changed in the Mochi app appear after the TTL,
+  with `refresh: true`, or per hit with `verify: true`, which re-fetches each hit live.
+- **Safe partial updates.** When only some template fields change, the server reads the live
+  card first and merges, so other fields are never dropped.
 - **Fewer requests.** Deck and template lists are cached for five minutes; changes
   made through this server refresh the cache. `list_cards` can follow pagination at
   100 cards per page.
@@ -31,7 +38,7 @@ The fork replaces the Vercel/Next.js transport with a standalone Node server and
 
 | Area | Tools |
 | --- | --- |
-| Cards | `list_cards`, `get_card`, `create_card`, `update_card`, `delete_card`, `add_attachment`, `delete_attachment`, `get_due_cards` |
+| Cards | `search_cards`, `list_cards`, `get_card`, `create_card`, `update_card`, `delete_card`, `add_attachment`, `delete_attachment`, `get_due_cards` |
 | Batch jobs | `create_cards`, `update_cards`, `delete_cards` (moves to trash by default), `get_cards`, `get_job`, `list_jobs`, `cancel_job` |
 | Decks | `list_decks`, `get_deck`, `create_deck`, `update_deck`, `delete_deck` |
 | Templates | `list_templates`, `get_template`, `create_template` |

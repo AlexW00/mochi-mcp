@@ -5,6 +5,7 @@
 export class FakeMochi {
   cards = new Map<string, Record<string, unknown>>();
   decks = new Map<string, Record<string, unknown>>([["deck1", { id: "deck1", name: "Japanese" }]]);
+  templates = new Map<string, Record<string, unknown>>();
   inFlight = 0;
   maxInFlight = 0;
   requests: string[] = [];
@@ -39,6 +40,11 @@ export class FakeMochi {
     const parts = url.pathname.replace(/^\/api\/?/, "").split("/").filter(Boolean);
     const [collection, id] = parts;
     if (collection === "decks" && !id && method === "GET") return json(200, { docs: [...this.decks.values()] });
+    if (collection === "templates" && !id && method === "GET") return json(200, { docs: [...this.templates.values()] });
+    if (collection === "templates" && id && method === "GET") {
+      const template = this.templates.get(id);
+      return template ? json(200, template) : json(404, { errors: ["Not found"] });
+    }
     if (collection === "cards" && !id && method === "POST") {
       if (!body?.["deck-id"]) return json(422, { errors: { "deck-id": "required" } });
       const card = { ...body, id: `card${this.nextId++}` };
@@ -47,8 +53,12 @@ export class FakeMochi {
     }
     if (collection === "cards" && !id && method === "GET") {
       const deckId = url.searchParams.get("deck-id");
-      const docs = [...this.cards.values()].filter((card) => !deckId || card["deck-id"] === deckId);
-      return json(200, { docs });
+      const all = [...this.cards.values()].filter((card) => !deckId || card["deck-id"] === deckId);
+      const limit = Number(url.searchParams.get("limit") ?? 10);
+      const offset = Number(url.searchParams.get("bookmark") ?? 0);
+      const docs = all.slice(offset, offset + limit);
+      // Like Mochi, a bookmark may be returned even when no further documents exist.
+      return json(200, { docs, bookmark: String(offset + docs.length) });
     }
     if (collection === "cards" && id) {
       const card = this.cards.get(id);

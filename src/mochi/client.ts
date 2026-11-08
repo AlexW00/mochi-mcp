@@ -95,6 +95,8 @@ interface CacheEntry {
 
 const CACHE_TTL_MS = 5 * 60_000;
 
+export type CardChange = { type: "upsert"; card: Card } | { type: "delete"; cardId: string };
+
 /**
  * Mochi REST client. Every network call goes through the shared MochiQueue,
  * so concurrent MCP sessions and batch jobs never exceed Mochi's limits.
@@ -104,6 +106,7 @@ const CACHE_TTL_MS = 5 * 60_000;
 export class MochiClient {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly authorization: string;
+  private readonly cardListeners: Array<(change: CardChange) => void> = [];
 
   constructor(
     apiKey: string,
@@ -176,10 +179,21 @@ export class MochiClient {
     return docs;
   }
 
+  /** Notifies listeners (the search index) about card writes made through this client. */
+  onCardChange(listener: (change: CardChange) => void): void {
+    this.cardListeners.push(listener);
+  }
+
+  private emit(change: CardChange): void {
+    for (const listener of this.cardListeners) listener(change);
+  }
+
   // Cards
 
-  createCard(input: CardInput, options: RequestOptions = {}): Promise<Card> {
-    return this.request<Card>("POST", "/cards", input, { ...options, idempotent: false });
+  async createCard(input: CardInput, options: RequestOptions = {}): Promise<Card> {
+    const card = await this.request<Card>("POST", "/cards", input, { ...options, idempotent: false });
+    if (card?.id) this.emit({ type: "upsert", card });
+    return card;
   }
 
   getCard(cardId: string, options: RequestOptions = {}): Promise<Card> {
@@ -221,15 +235,21 @@ export class MochiClient {
   }
 
   /** Full-field update. Mochi applies the provided fields; repeating it is safe. */
-  updateCard(cardId: string, input: CardInput, options: RequestOptions = {}): Promise<Card> {
-    return this.request<Card>("POST", `/cards/${encodeURIComponent(cardId)}`, input, { ...options, idempotent: true });
-  }
-
-  deleteCard(cardId: string, options: RequestOptions = {}): Promise<void> {
-    return this.request<void>("DELETE", `/cards/${encodeURIComponent(cardId)}`, undefined, {
+  async updateCard(cardId: string, input: CardInput, options: RequestOptions = {}): Promise<Card> {
+    const card = await this.request<Card>("POST", `/cards/${encodeURIComponent(cardId)}`, input, {
       ...options,
       idempotent: true,
     });
+    if (card?.id) this.emit({ type: "upsert", card });
+    return card;
+  }
+
+  async deleteCard(cardId: string, options: RequestOptions = {}): Promise<void> {
+    await this.request<void>("DELETE", `/cards/${encodeURIComponent(cardId)}`, undefined, {
+      ...options,
+      idempotent: true,
+    });
+    this.emit({ type: "delete", cardId });
   }
 
   addAttachment(
