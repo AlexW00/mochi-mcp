@@ -1,29 +1,41 @@
 {
-  "name": "mochi-mcp-server",
+  "name": "mochi-mcp",
   "version": "1.0.0",
-  "description": "MCP Server for Mochi Cards - Create flashcards with AI",
+  "description": "Rate-limit-aware MCP server for Mochi Cards with batch jobs, Streamable HTTP and OAuth",
   "type": "module",
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "build:stdio": "tsc -p tsconfig.stdio.json",
-    "start:stdio": "node dist/stdio.js"
-  },
-  "keywords": ["mcp", "mochi", "flashcards", "ai"],
-  "author": "",
   "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlexW00/mochi-mcp.git"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "mochi-mcp": "dist/src/stdio.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/src/http.js",
+    "start:stdio": "node dist/src/stdio.js",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "keywords": [
+    "mcp",
+    "mochi",
+    "flashcards",
+    "spaced-repetition"
+  ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.24.3",
-    "next": "^16.0.10",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3",
-    "zod": "^4.2.0"
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "express": "5.3.0",
+    "express-rate-limit": "8.7.2",
+    "zod": "4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^25.0.2",
-    "@types/react": "^19.2.7",
-    "@types/react-dom": "^19.2.3",
-    "typescript": "^5.9.3"
+    "@types/express": "5.0.6",
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3"
   }
 }

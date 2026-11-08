@@ -1,155 +1,118 @@
-# Mochi MCP Server
+# Mochi MCP
 
-An MCP server for creating and managing Mochi Cards flashcards via AI.
+An [MCP](https://modelcontextprotocol.io) server for [Mochi Cards](https://mochi.cards).
+It handles Mochi's API limits for you and works as a remote connector in Claude and ChatGPT.
 
-Supports both **HTTP/SSE** (for Vercel deployment) and **stdio** (for local use with Claude Desktop).
+This is a fork of [shunkus/mochi-mcp-server](https://github.com/shunkus/mochi-mcp-server).
+The fork replaces the Vercel/Next.js transport with a standalone Node server and adds:
 
-## Features
+- **A single request queue.** [Mochi's API](https://mochi.cards/docs/api/) allows one
+  concurrent request per account and answers bursts with `429`. All MCP sessions and
+  batch jobs share one queue that sends one request at a time with a minimum gap
+  between requests. On `429` the gap doubles and the request is retried, honouring
+  `Retry-After`; the gap then shrinks gradually as requests succeed. Interactive calls
+  go ahead of queued batch work.
+- **Batch tools that run as background jobs.** Mochi has no bulk endpoints.
+  `create_cards`, `update_cards`, `delete_cards` and `get_cards` accept up to
+  500 items (200 for `get_cards`) and run them through the queue. Each one waits up to
+  `wait_seconds`, then returns either the results or a `job_id` to poll with `get_job`.
+  If an identical write batch is resubmitted within 15 minutes, the server returns the
+  existing job instead of writing the items again.
+- **Fewer requests.** Deck and template lists are cached for five minutes; changes
+  made through this server refresh the cache. `list_cards` can follow pagination at
+  100 cards per page.
+- **Safe retries.** `429` is always retried, because Mochi did not process the request.
+  Timeouts, network errors and `5xx` responses are retried only for idempotent calls
+  (reads, updates and deletes), never for card or deck creation.
+- **Streamable HTTP with OAuth 2.1**, which Claude.ai and ChatGPT connectors need, plus a
+  static bearer token for clients that can send headers.
 
-### Card Operations
-- `create_card` - Create a new card
-- `get_card` - Get card details
-- `list_cards` - List cards
-- `update_card` - Update a card
-- `delete_card` - Delete a card
-- `add_attachment` - Add attachment to a card
-- `delete_attachment` - Delete attachment
-- `create_cards_bulk` - Create multiple cards at once
+## Tools
 
-### Deck Operations
-- `create_deck` - Create a new deck
-- `get_deck` - Get deck details
-- `list_decks` - List all decks
-- `update_deck` - Update a deck
-- `delete_deck` - Delete a deck
+| Area | Tools |
+| --- | --- |
+| Cards | `list_cards`, `get_card`, `create_card`, `update_card`, `delete_card`, `add_attachment`, `delete_attachment`, `get_due_cards` |
+| Batch jobs | `create_cards`, `update_cards`, `delete_cards` (moves to trash by default), `get_cards`, `get_job`, `list_jobs`, `cancel_job` |
+| Decks | `list_decks`, `get_deck`, `create_deck`, `update_deck`, `delete_deck` |
+| Templates | `list_templates`, `get_template`, `create_template` |
+| Diagnostics | `queue_status` |
 
-### Template Operations
-- `create_template` - Create a new template
-- `get_template` - Get template details
-- `list_templates` - List all templates
+Each tool has MCP annotations (read-only, destructive, idempotent), so clients can ask
+before destructive calls. `add_attachment` downloads only from public `https` URLs,
+following at most three redirects, and accepts files up to 10 MiB.
 
-### Review
-- `get_due_cards` - Get cards due for review
+## Configuration
 
-## Deployment
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MOCHI_API_KEY` | required | API key from Mochi → Account settings → API |
+| `MCP_PUBLIC_URL` | required (HTTP) | Public origin, e.g. `https://mochi.example.com`; the endpoint is `<origin>/mcp` |
+| `MCP_AUTH_SECRET` | required (HTTP) | Owner secret of at least 32 characters, e.g. `openssl rand -hex 32` |
+| `MCP_AUTH_DISABLED` | `false` | `true` disables auth; use it only on a trusted local network |
+| `OAUTH_REDIRECT_ALLOWLIST` | Claude, ChatGPT and loopback hosts | Comma-separated redirect hosts that OAuth clients may register; `*` allows any host |
+| `OAUTH_ACCESS_TOKEN_TTL_SECONDS` | `3600` | Access token lifetime |
+| `OAUTH_REFRESH_TOKEN_TTL_SECONDS` | `2592000` | Refresh token lifetime (30 days) |
+| `MOCHI_MIN_INTERVAL_MS` | `300` | Minimum gap between Mochi requests |
+| `MOCHI_MAX_INTERVAL_MS` | `30000` | Maximum adaptive gap after `429` |
+| `MOCHI_MAX_RETRIES` | `6` | Retries per request |
+| `MOCHI_REQUEST_TIMEOUT_MS` | `30000` | Per-request timeout |
+| `MOCHI_MAX_PENDING` | `500` | Maximum number of queued requests |
+| `PORT` | `8000` | Listening port |
+| `TRUST_PROXY_HOPS` | `1` | Reverse proxies in front of the server, used for client IPs in rate limiting |
 
-### Deploy to Vercel
+Run **one replica** per Mochi account. Each process has its own queue, so a second
+replica would break Mochi's one-request-at-a-time limit. Batch jobs live in memory:
+they last 24 hours and are lost when the process restarts.
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/shunkus/mochi-mcp-server&env=MOCHI_API_KEY&envDescription=Your%20Mochi%20Cards%20API%20key)
+## Authentication
 
-1. Click the deploy button above
-2. Set the `MOCHI_API_KEY` environment variable
-3. Deploy
+The server is its own single-user OAuth authorization server, with no database:
 
-### API Endpoints
+1. A client discovers it through `/.well-known/oauth-protected-resource/mcp` and
+   `/.well-known/oauth-authorization-server`, then registers dynamically.
+2. You are sent to an approval page and enter `MCP_AUTH_SECRET`. A password manager
+   can fill it in: save it as a login for your server's URL with username `owner`.
+3. The client receives a one-hour access token and a refresh token, both protected with PKCE.
 
-- `GET /` - Server info page
-- `POST /api/mcp` - MCP JSON-RPC endpoint
-- `GET /api/mcp/sse` - SSE endpoint for streaming connections
-- `POST /api/mcp/sse` - SSE message endpoint
+Clients, authorization codes and tokens are HMAC-signed and contain everything needed
+to check them, so they survive restarts. Rotating `MCP_AUTH_SECRET` revokes every token
+and client registration. Failed approval attempts are rate-limited, and only allowlisted
+redirect hosts can register. The page shows the redirect host before you approve.
 
-### Example Request
+Any client that can send headers can also use `Authorization: Bearer <MCP_AUTH_SECRET>`.
 
-```bash
-curl -X POST https://your-domain.vercel.app/api/mcp \
-  -H "Content-Type: application/json" \
-  -H "x-mochi-api-key: YOUR_API_KEY" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/list"
-  }'
+### Connecting clients
+
+- **Claude.ai / Claude Desktop:** Settings → Connectors → Add custom connector, URL
+  `https://<host>/mcp`. Leave the OAuth client fields empty.
+- **ChatGPT:** Settings → Apps & Connectors → Advanced → enable developer mode, then
+  create a connector with URL `https://<host>/mcp` and authentication *OAuth*.
+- **Claude Code:**
+  `claude mcp add --transport http mochi https://<host>/mcp --header "Authorization: Bearer $MOCHI_MCP_SECRET"`,
+  or omit the header and complete OAuth with `/mcp`.
+- **Local stdio:** `MOCHI_API_KEY=… node dist/src/stdio.js`, without HTTP or auth.
+
+## Development
+
+```sh
+npm ci
+npm test          # build + unit and end-to-end tests (fake Mochi API, full OAuth flow)
+npm run typecheck
+MOCHI_API_KEY=… MCP_PUBLIC_URL=http://localhost:8000 MCP_AUTH_DISABLED=true npm start
 ```
 
-## Local Development
+## Releases
 
-### Installation
+Pushing a tag `vX.Y.Z` that matches `package.json` runs the tests and publishes
+`ghcr.io/alexw00/mochi-mcp:X.Y.Z` (plus `X.Y`, `X` and `latest`) for `linux/amd64` and
+`linux/arm64`, with provenance and an SBOM. The workflow summary prints the digest.
+Deployments should pin `X.Y.Z@sha256:…`.
 
-```bash
-npm install
+```sh
+npm version patch   # bumps package.json and creates the tag
+git push --follow-tags
 ```
-
-### Development Server
-
-```bash
-npm run dev
-```
-
-### Build
-
-```bash
-npm run build
-```
-
-## Stdio Mode (Claude Desktop)
-
-For local use with Claude Desktop, use the stdio transport:
-
-### Build stdio version
-
-```bash
-npm run build:stdio
-```
-
-### Claude Desktop Configuration
-
-Add the following to `~/Library/Application Support/Claude/claude_desktop_config.json` (Mac) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
-
-```json
-{
-  "mcpServers": {
-    "mochi": {
-      "command": "node",
-      "args": ["/path/to/mochi-mcp-server/dist/stdio.js"],
-      "env": {
-        "MOCHI_API_KEY": "your-api-key-here"
-      }
-    }
-  }
-}
-```
-
-## Getting Mochi API Key
-
-1. Log in to [Mochi Cards](https://mochi.cards)
-2. Go to Account Settings → API to get your API key
-
-## Usage
-
-### Creating Cards
-
-Card content is in Markdown format. Use `---` to separate front and back:
-
-```
-What is the capital of France?
----
-Paris
-```
-
-### Bulk Card Creation
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "create_cards_bulk",
-    "arguments": {
-      "deck_id": "deck-id",
-      "cards": [
-        { "content": "Question 1\n---\nAnswer 1" },
-        { "content": "Question 2\n---\nAnswer 2", "tags": ["tag1", "tag2"] }
-      ]
-    }
-  }
-}
-```
-
-## Notes
-
-- Mochi API only accepts one concurrent request per account
-- Be aware of rate limits (429 error)
-- Deck deletion cannot be undone
 
 ## License
 
-ISC
+ISC. See [LICENSE](LICENSE).
