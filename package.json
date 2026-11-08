@@ -1,6 +1,6 @@
 {
   "name": "mochi-mcp",
-  "version": "1.0.0",
+  "version": "0.0.0-development",
   "description": "Rate-limit-aware MCP server for Mochi Cards with batch jobs, Streamable HTTP and OAuth",
   "type": "module",
   "license": "ISC",

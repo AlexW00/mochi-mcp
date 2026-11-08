@@ -13,6 +13,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint GitHub workflows
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -52,4 +61,11 @@ jobs:
             -e MCP_AUTH_SECRET="$(openssl rand -hex 24)" mochi-mcp:ci
           for _ in $(seq 1 20); do curl -fsS http://127.0.0.1:8000/healthz && break; sleep 1; done
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8000/mcp -H 'content-type: application/json' -d '{}')" = 401
+          curl -fsS http://127.0.0.1:8000/.well-known/oauth-authorization-server | grep -q '"registration_endpoint"'
           docker rm -f smoke
+      - name: Refuses to start without an auth secret
+        run: |
+          if docker run --rm -e MOCHI_API_KEY=placeholder -e MCP_PUBLIC_URL=https://mochi.validation.invalid mochi-mcp:ci; then
+            echo "container started without MCP_AUTH_SECRET" >&2
+            exit 1
+          fi

@@ -6,7 +6,7 @@ import { JobManager } from "./jobs.js";
 import type { Config } from "./config.js";
 
 export const SERVER_NAME = "mochi-mcp";
-export const SERVER_VERSION = process.env.APP_VERSION ?? "1.0.0";
+export const SERVER_VERSION = process.env.APP_VERSION ?? "dev";
 
 const INSTRUCTIONS = `Mochi Cards flashcards. Every Mochi API call passes through one rate-limited queue (Mochi allows one concurrent request per account).
 - Prefer the batch tools (create_cards, update_cards, delete_cards, get_cards) over many single calls; they run as background jobs and return a job_id when they need longer than wait_seconds. Poll with get_job rather than resubmitting.

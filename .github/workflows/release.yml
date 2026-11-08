@@ -1,20 +1,78 @@
-name: Release image
+name: Release
 
-# Push a semver tag (for example v1.2.3) to publish
-# ghcr.io/<owner>/mochi-mcp:1.2.3, :1.2, :1 and :latest for linux/amd64 and linux/arm64.
+# Every change to main that affects the image produces a new release:
+# tests -> next semver tag -> multi-arch image on GHCR -> GitHub release.
+#
+# Merges performed by GitHub's auto-merge bot (Dependabot) do not trigger push
+# workflows, so a daily schedule releases any unreleased changes as well.
+# Manual runs can choose the bump level.
 on:
   push:
-    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+    branches: [main]
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version component to increase
+        type: choice
+        options: [patch, minor, major]
+        default: patch
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        env:
+          BUMP: ${{ inputs.bump || 'patch' }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          if [ -z "$last" ]; then
+            last=v0.0.0
+            changed=yes
+          elif git tag --points-at HEAD | grep -qx "$last"; then
+            changed=no
+          else
+            # Documentation and repository metadata do not change the image.
+            changed=$(git diff --name-only "$last" HEAD -- . \
+              ':(exclude)*.md' ':(exclude)LICENSE' ':(exclude).github/dependabot.yml' \
+              | grep -q . && echo yes || echo no)
+          fi
+          if [ "$changed" = no ] && [ "$EVENT" != workflow_dispatch ]; then
+            echo "No image-relevant changes since $last."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          IFS=. read -r major minor patch <<< "${last#v}"
+          case "$BUMP" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            *) patch=$((patch + 1)) ;;
+          esac
+          version="$major.$minor.$patch"
+          echo "Releasing $version (previous $last)."
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -24,18 +82,18 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - name: Tag matches package.json version
-        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
 
   publish:
+    needs: [plan, test]
     runs-on: ubuntu-latest
-    needs: test
     permissions:
-      contents: read
+      contents: write
       packages: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,13 +110,16 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/mochi-mcp
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=semver,pattern={{version}},value=v${{ env.VERSION }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ env.VERSION }}
+            type=semver,pattern={{major}},value=v${{ env.VERSION }}
+            type=raw,value=latest
           labels: |
             org.opencontainers.image.title=mochi-mcp
             org.opencontainers.image.description=Rate-limit-aware MCP server for Mochi Cards
-      - id: build
+            org.opencontainers.image.version=${{ env.VERSION }}
+      - name: Build and push linux/amd64 and linux/arm64
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -66,22 +127,35 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: APP_VERSION=${{ steps.meta.outputs.version }}
+          build-args: APP_VERSION=${{ env.VERSION }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Summary
+      - name: Smoke test the published image
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-          VERSION: ${{ steps.meta.outputs.version }}
           OWNER: ${{ github.repository_owner }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          image="ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/mochi-mcp@${DIGEST}"
+          docker run -d --name smoke -p 8000:8000 \
+            -e MOCHI_API_KEY=placeholder \
+            -e MCP_PUBLIC_URL=https://mochi.validation.invalid \
+            -e MCP_AUTH_SECRET="$(openssl rand -hex 24)" "$image"
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/healthz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8000/healthz | grep -q "\"version\":\"${VERSION}\""
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8000/mcp -H 'content-type: application/json' -d '{}')" = 401
+          docker rm -f smoke
+      - name: Tag and create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           owner=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
-          {
-            echo "### Published"
-            echo
-            echo '```'
-            echo "ghcr.io/${owner}/mochi-mcp:${VERSION}@${DIGEST}"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          pin="ghcr.io/${owner}/mochi-mcp:${VERSION}@${DIGEST}"
+          fence='```'
+          printf 'Image:\n\n%s\n%s\n%s\n' "$fence" "$pin" "$fence" > notes.md
+          gh release create "v${VERSION}" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "v${VERSION}" --notes-file notes.md --generate-notes
+          printf '### Published\n\n%s\n%s\n%s\n' "$fence" "$pin" "$fence" >> "$GITHUB_STEP_SUMMARY"

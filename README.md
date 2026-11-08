@@ -101,17 +101,31 @@ npm run typecheck
 MOCHI_API_KEY=… MCP_PUBLIC_URL=http://localhost:8000 MCP_AUTH_DISABLED=true npm start
 ```
 
-## Releases
+## Releases and dependency updates
 
-Pushing a tag `vX.Y.Z` that matches `package.json` runs the tests and publishes
-`ghcr.io/alexw00/mochi-mcp:X.Y.Z` (plus `X.Y`, `X` and `latest`) for `linux/amd64` and
-`linux/arm64`, with provenance and an SBOM. The workflow summary prints the digest.
-Deployments should pin `X.Y.Z@sha256:…`.
+Every push to `main` that changes more than docs or Dependabot config publishes a release.
+A daily run catches merges made by GitHub's auto-merge, which don't trigger push workflows.
+Each release:
 
-```sh
-npm version patch   # bumps package.json and creates the tag
-git push --follow-tags
-```
+1. runs typecheck and tests;
+2. creates the next patch version from the latest `vX.Y.Z` tag (manual runs of
+   **Release** can bump the minor or major version instead);
+3. publishes `ghcr.io/alexw00/mochi-mcp:X.Y.Z` plus `X.Y`, `X` and `latest` for
+   `linux/amd64` and `linux/arm64`, with provenance and an SBOM;
+4. smoke-tests the published image, then creates the GitHub release. The release
+   notes contain the `X.Y.Z@sha256:…` reference to pin in deployments.
+
+Versions come from git tags; `package.json` keeps `0.0.0-development`.
+
+Dependabot opens weekly PRs for npm, the Docker base image and GitHub Actions.
+Minor and patch updates are queued for auto-merge. Branch protection on `main`
+requires the CI checks to pass first:
+
+- `workflows`: actionlint
+- `test`: typecheck and tests
+- `image`: Docker build, container smoke test, auth-required startup check
+
+PRs that fail a check stay open. Major updates always need manual review.
 
 ## License
 
