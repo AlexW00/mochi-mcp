@@ -8,6 +8,7 @@ RUN npm ci --no-audit --no-fund
 COPY tsconfig.json ./
 COPY src ./src
 COPY test ./test
+COPY scripts ./scripts
 RUN npm run build && npm prune --omit=dev
 
 FROM ${NODE_IMAGE}

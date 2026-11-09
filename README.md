@@ -112,6 +112,24 @@ npm run typecheck
 MOCHI_API_KEY=… MCP_PUBLIC_URL=http://localhost:8000 MCP_AUTH_DISABLED=true npm start
 ```
 
+## Maintenance scripts
+
+`scripts/link-kanji.ts` replaces the kanji in a vocab field with links to the matching
+kanji cards (`[[危|<card id>]]`). It uses the same request queue as the server, so run it
+while nothing else is writing heavily. Field and template IDs default to the author's
+templates; override them with `--field`, `--vocab-template` and `--kanji-template`.
+
+```sh
+npm run build
+node dist/scripts/link-kanji.js link --deck <id> --dry-run   # preview, writes a JSON backup
+node dist/scripts/link-kanji.js clone --deck <id> --limit 50 # archived copy for a test
+node dist/scripts/link-kanji.js link --deck <id> [--limit N] # update; re-run to resume
+node dist/scripts/link-kanji.js restore --log link-kanji-runs/link-….jsonl
+```
+
+Each write takes about 0.7 seconds. Copies made by `clone` don't include attachments
+(audio, images), because the API can't copy them.
+
 ## Releases and dependency updates
 
 Every push to `main` that changes more than docs or Dependabot config publishes a release.
