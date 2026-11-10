@@ -35,6 +35,7 @@ const DEFAULTS = {
 };
 
 const HAN = /\p{Script=Han}/u;
+export const WORD_JOINER = "\u2060";
 const OPEN = new Set(["(", "（"]);
 const CLOSE = new Set([")", "）"]);
 
@@ -105,7 +106,8 @@ export function linkKanji(text: string, kanji: Map<string, string>): { text: str
     else if (CLOSE.has(ch)) depth = Math.max(0, depth - 1);
     out += depth === 0 && HAN.test(ch) && ch !== "々" ? (link(ch) ?? ch) : ch;
   }
-  return { text: out, linked, missing };
+  // Mochi misparses adjacent links (`]][[`); an invisible word joiner keeps them apart.
+  return { text: out.replaceAll("]][[", `]]${WORD_JOINER}[[`), linked, missing };
 }
 
 function client(): MochiClient {
