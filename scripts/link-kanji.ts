@@ -13,6 +13,7 @@
  *
  *   node dist/scripts/link-kanji.js clone --deck <id> [--limit 50] [--sample]
  *   node dist/scripts/link-kanji.js link  --deck <id> [--limit 50] [--dry-run]
+ *   node dist/scripts/link-kanji.js relink  --log <link-log.jsonl> [--dry-run]
  *   node dist/scripts/link-kanji.js restore --log <link-log.jsonl>
  *
  * `link` writes a full JSON backup of the deck tree and a JSONL log of every
@@ -37,33 +38,72 @@ const HAN = /\p{Script=Han}/u;
 const OPEN = new Set(["(", "（"]);
 const CLOSE = new Set([")", "）"]);
 
-/** Links every kanji outside parentheses and existing [[links]] that has a card in `kanji`. */
+// Tokens that must not be split: existing Mochi links, Markdown links, HTML tags,
+// and furigana groups such as 覧(らん) or 商品（しょうひん）.
+const TOKEN = new RegExp(
+  [
+    String.raw`(?<mochi>\[\[[^\]]*\]\])`,
+    String.raw`(?<md>\[(?<label>[^\[\]]+)\]\([^)\s]+\))`,
+    String.raw`(?<html><[^>]*>)`,
+    String.raw`(?<base>\p{Script=Han}+)[(（](?<reading>[\p{Script=Hiragana}\p{Script=Katakana}ー・]+)[)）]`,
+  ].join("|"),
+  "uy",
+);
+
+/**
+ * Links every kanji outside parentheses that has a card in `kanji`.
+ * - Furigana: a single kanji keeps its reading inside the link (`[[覧(らん)|id]]`,
+ *   which Mochi renders as ruby); a compound gets one link per kanji and the
+ *   reading as plain text (`[[商|a]][[品|b]]（しょうひん）`). `[[覧|id]](らん)`
+ *   would break Mochi's furigana parser.
+ * - A Markdown link whose label is one kanji (`[縮](https://jpdb.io/…)`) becomes
+ *   the Mochi link; other Markdown links and HTML are left untouched.
+ */
 export function linkKanji(text: string, kanji: Map<string, string>): { text: string; linked: string[]; missing: string[] } {
   let out = "";
   let depth = 0;
   const linked: string[] = [];
   const missing: string[] = [];
-  // Odd-indexed parts are existing [[links]], copied verbatim.
-  const parts = text.split(/(\[\[[^\]]*\]\])/);
-  for (const [index, part] of parts.entries()) {
-    if (index % 2 === 1) {
-      out += part;
+  const link = (ch: string, label = ch): string | undefined => {
+    const id = kanji.get(ch);
+    if (!id) {
+      missing.push(ch);
+      return undefined;
+    }
+    linked.push(ch);
+    return `[[${label}|${id}]]`;
+  };
+
+  let i = 0;
+  while (i < text.length) {
+    TOKEN.lastIndex = i;
+    const match = TOKEN.exec(text);
+    if (match?.groups) {
+      const { mochi, md, label, html, base, reading } = match.groups;
+      if (mochi || html) {
+        out += match[0];
+      } else if (md) {
+        const chars = [...(label ?? "")];
+        out += depth === 0 && chars.length === 1 && HAN.test(chars[0]!) ? (link(chars[0]!) ?? match[0]) : match[0];
+      } else if (base && reading) {
+        const chars = [...base];
+        if (depth > 0) {
+          out += match[0];
+        } else if (chars.length === 1) {
+          out += link(base, `${base}(${reading})`) ?? match[0];
+        } else {
+          const parts = chars.map((ch) => (ch === "々" ? ch : (link(ch) ?? ch)));
+          out += parts.join("") === base ? match[0] : `${parts.join("")}（${reading}）`;
+        }
+      }
+      i += match[0].length;
       continue;
     }
-    for (const ch of part) {
-      if (OPEN.has(ch)) depth += 1;
-      else if (CLOSE.has(ch)) depth = Math.max(0, depth - 1);
-      if (depth === 0 && HAN.test(ch) && ch !== "々") {
-        const id = kanji.get(ch);
-        if (id) {
-          out += `[[${ch}|${id}]]`;
-          linked.push(ch);
-          continue;
-        }
-        missing.push(ch);
-      }
-      out += ch;
-    }
+    const ch = String.fromCodePoint(text.codePointAt(i)!);
+    i += ch.length;
+    if (OPEN.has(ch)) depth += 1;
+    else if (CLOSE.has(ch)) depth = Math.max(0, depth - 1);
+    out += depth === 0 && HAN.test(ch) && ch !== "々" ? (link(ch) ?? ch) : ch;
   }
   return { text: out, linked, missing };
 }
@@ -229,6 +269,40 @@ async function restore(opts: { log: string }) {
   console.log(`Done, ${failed} failed.`);
 }
 
+async function relink(opts: { log: string; dryRun: boolean; kanjiTemplate: string }) {
+  const mochi = client();
+  const kanji = await kanjiMap(mochi, opts.kanjiTemplate);
+  const entries = readFileSync(opts.log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    .filter((entry) => entry.status === "ok");
+  const fixes = entries.map((entry) => ({ ...entry, fixed: linkKanji(entry.before, kanji).text }))
+    .filter((entry) => entry.fixed !== entry.after);
+  console.log(`${entries.length} logged cards, ${fixes.length} need a fix.`);
+  for (const entry of fixes.slice(0, 8)) console.log(`  ${entry.name}: ${entry.after}\n     → ${entry.fixed}`);
+  if (opts.dryRun) return;
+  const fixLog = opts.log.replace(/\.jsonl$/, "") + `-relink-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`;
+  let failed = 0;
+  for (const [i, entry] of fixes.entries()) {
+    const record = { id: entry.id, name: entry.name, field: entry.field, before: entry.after, after: entry.fixed, status: "ok", error: undefined as string | undefined };
+    try {
+      const card = await mochi.getCard(entry.id);
+      if (card.fields?.[entry.field]?.value !== entry.after) {
+        record.status = "skipped";
+        console.log(`  skip ${entry.name}: field changed since the run`);
+      } else {
+        await mochi.updateCard(entry.id, { fields: { ...card.fields, [entry.field]: { id: entry.field, value: entry.fixed } } });
+      }
+    } catch (error) {
+      failed += 1;
+      record.status = "failed";
+      record.error = (error as Error).message.slice(0, 300);
+      console.error(`  ! ${entry.name} (${entry.id}): ${record.error}`);
+    }
+    appendFileSync(fixLog, JSON.stringify(record) + "\n");
+    if ((i + 1) % 25 === 0 || i + 1 === fixes.length) console.log(`  ${i + 1}/${fixes.length}`);
+  }
+  console.log(`Done, ${failed} failed. Log (usable with restore): ${resolve(fixLog)}`);
+}
+
 async function main() {
   const { positionals, values } = parseArgs({
     allowPositionals: true,
@@ -262,10 +336,12 @@ async function main() {
         vocabTemplate: values["vocab-template"],
         kanjiTemplate: values["kanji-template"],
       });
+    case "relink":
+      return relink({ log: need(values.log, "log"), dryRun: values["dry-run"], kanjiTemplate: values["kanji-template"] });
     case "restore":
       return restore({ log: need(values.log, "log") });
     default:
-      console.error("Usage: link-kanji.js clone|link|restore … (see the header of scripts/link-kanji.ts)");
+      console.error("Usage: link-kanji.js clone|link|relink|restore … (see the header of scripts/link-kanji.ts)");
       process.exitCode = 2;
   }
 }

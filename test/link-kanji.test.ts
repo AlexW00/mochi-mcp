@@ -21,3 +21,20 @@ test("is idempotent and ignores kana, full-width parentheses and 々", () => {
   assert.equal(once, "[[危|k1]]々 （危） + く (Endung: Verb)");
   assert.equal(linkKanji(once, kanji).text, once);
 });
+
+test("keeps furigana working", () => {
+  const map = new Map([["覧", "r1"], ["商", "s1"], ["品", "s2"]]);
+  assert.equal(linkKanji("ご＋ 覧(らん)（見ること）", map).text, "ご＋ [[覧(らん)|r1]]（見ること）");
+  assert.equal(linkKanji("新 ＋ 商品(しょうひん) (Ware)", map).text, "新 ＋ [[商|s1]][[品|s2]]（しょうひん） (Ware)");
+  assert.equal(linkKanji("意見(いけん)", map).text, "意見(いけん)");
+  const once = linkKanji("覧(らん) + 商品（しょうひん）", map).text;
+  assert.equal(linkKanji(once, map).text, once);
+});
+
+test("replaces single-kanji Markdown links and leaves other links alone", () => {
+  const map = new Map([["縮", "c1"], ["払", "c2"]]);
+  assert.equal(
+    linkKanji("[縮](https://jpdb.io/kanji/%E7%B8%AE#a) shrink, [払う](https://x.y) pay, <b>払</b>", map).text,
+    "[[縮|c1]] shrink, [払う](https://x.y) pay, <b>[[払|c2]]</b>",
+  );
+});
